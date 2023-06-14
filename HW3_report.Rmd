@@ -1,0 +1,1163 @@
+---
+title: "Final Homework"
+author: "Emanuele, Lentini, Lombardi, Saba"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+<font size="4">
+
+# Part A
+
+```{r warning=FALSE, echo=FALSE, results='hide', message=FALSE}
+#Load Libraries
+library(Metrics)
+library(e1071)
+library(data.table)
+library(kernlab)
+library(ggplot2)
+library(caret)
+library(klaR)
+library(igraph)
+library(plotly)
+library(randomForest)
+library(mlbench)
+
+
+```
+Load data.
+```{r warning=FALSE, results='hide', message=FALSE}
+traindf <- fread('statistical-learning-hw03-2022/train_hw03.csv') 
+testdf <- fread('statistical-learning-hw03-2022/test_hw03.csv') 
+```
+
+Let's observe the train dataset and handle the data accordingly.
+
+As stated in the assignment, for every observation we have:
+
+* id
+* age
+* sex
+* y, the target variable,
+* list of features that represents 115 Time Series of different (116) Region of Interest (Roi) of the brain.
+
+Lets define these variables:
+```{r variables}
+# ROI 116, time slots 115
+nroi=116
+ntime=115
+```
+
+## A.1 Best method: Functional Connectome 
+
+The procedure is now to create a **functional connectome** of every observation: as linked in the paper, a Connectome is a network that describe the neural connections of the ROIs by computing a statistical association measure between time series of ROIs.
+
+### List of datasets.
+To start, we had to organize the dataset in a different way. We created a list of datasets of every single observation: every dataset have all the ROI's stacked one over the other as a matrix ROIxTIME.  
+```{r List Datasets}
+## CREATE LIST OF DATASETS OF A SINGLE OBSERVATION 
+train_OBS_l = list()
+
+for (i in 1:nrow(traindf)){   #scan every observation 
+  #each time, create empty matrix of nroixntime
+  df_obs <- matrix(NA,nrow = nroi, ncol = ntime)
+  for (j in 1:nroi){
+    ##fill the matrix with slices of the obs 
+    df_obs[j,] <- as.numeric(traindf[i,(5+(j-1)*ntime):(5+(ntime-1) +(j-1)*ntime)])
+  }
+  #save in the list of datasets
+  train_OBS_l <- append(train_OBS_l,list(df_obs))
+}
+remove(df_obs)
+
+## Now we have every observation in order in a df list
+train_OBS_l[[1]][1:10,1:10] 
+
+```
+
+Visual Representation.
+
+```{r Visual Heatmap, echo=FALSE}
+OBS=1
+heatmap(train_OBS_l[[OBS]],Rowv = NA,Colv = NA,scale="none",
+        main=paste("Obs n.",traindf$id[OBS],', age',round(traindf$age[OBS],1),
+                   ',',traindf$sex[OBS],':',traindf$y[OBS]),
+        xlab = "Time", ylab = 'ROIs')
+```
+
+This is the heatmap of one dataset we created: observation n 1 displayed.
+
+Other statistics and visualization of Observation 1.
+```{r 4 plots, fig1, fig.height = 7, fig.width = 8, fig.align = "center", ,echo=FALSE}
+
+par(mfrow=c(2,2))
+boxplot(t(train_OBS_l[[OBS]]), 
+        xlab="ROIs", main="Boxplot of every ROI")
+boxplot(train_OBS_l[[OBS]],
+        xlab="Time", main="Boxplot of every time")
+
+##observe some row (specific roi varying time) lines 
+plot(train_OBS_l[[OBS]][1,],ylim=c(min(train_OBS_l[[OBS]]),max(train_OBS_l[[OBS]])),
+    main="Specific roi varying over time",xlab="Time",ylab="ROIs")
+lines(train_OBS_l[[OBS]][1,])
+lines(train_OBS_l[[OBS]][2,],col="red")
+lines(train_OBS_l[[OBS]][3,],col="blue")
+lines(train_OBS_l[[OBS]][4,],col="orange")
+lines(train_OBS_l[[OBS]][108,],col="pink")
+
+
+##observe some col (specific time varying roi) lines
+plot(train_OBS_l[[OBS]][,1],ylim=c(min(train_OBS_l[[OBS]]),max(train_OBS_l[[OBS]])),
+     main="Specific time varying ROIs", xlab="ROIs", ylab="Time")
+lines(train_OBS_l[[OBS]][,1])
+lines(train_OBS_l[[OBS]][,2],col="red")
+lines(train_OBS_l[[OBS]][,3],col="blue")
+lines(train_OBS_l[[OBS]][,4],col="orange")
+lines(train_OBS_l[[OBS]][,33],col="pink")
+
+```
+
+### Create Connectome 
+For every Observation-dataset, take the correlation between the ROI's.
+```{r First Correlation }
+##first tryout with obs 1
+OBS=1
+## correlation matrix is a column based function, so it must be transposed first
+# if we want correlation between the Rows (ROI)
+#Absolute values 
+cor_mat1 <- abs(cor(t(train_OBS_l[[OBS]])))
+```
+
+#### A few visualizations of the Connectome.
+
+```{r Heatmap Connectome, echo=FALSE}
+#visualiz
+#Choose a sub-space, not all 116 ROI
+n=25
+
+#1. Heatmap
+heatmap(cor_mat1[1:n,1:n],Rowv = NA,Colv = NA,scale="none", main = paste("Connectome of first",n,"ROIs correlation"))
+
+#title(main="Connectome matrix",
+#      sub = paste("First", n, "ROIs Correlation of obs",OBS,',',
+#                   round(traindf$age[OBS],1),traindf$sex[OBS],':',traindf$y[OBS]))
+```
+
+#### As a Graph 
+```{r Graph Connectome,fig2, fig.height = 5, fig.width = 6, fig.align = "center", echo=FALSE}
+#par(mfrow=c(1,2))
+#Graph
+c <- cor_mat1[1:n,1:n]^(2)
+diag(c) <- 0
+c <- c*10
+#cut connections under 60s percentile
+c[c<quantile(c, 0.8)] <- 0.00
+diag(c)<-0
+g<- graph_from_adjacency_matrix(c, mode="undirected", weighted = T )
+
+minC <- rep(-Inf, vcount(g))
+maxC <- rep(Inf, vcount(g))
+minC[1] <- maxC[1] <- 0
+co <- layout_with_fr(g, minx=minC, maxx=maxC,
+                     miny=minC, maxy=maxC)
+
+#par(mfrow=c(2,1))
+plot(g,edge.width = E(g)$weight,
+     main=paste("Graph of the first", n,'ROIs correlations'))
+```
+
+### Create Connectome Dataset
+
+```{r Create Connectome, warning=FALSE}
+
+### CONNECTOME DATASET
+
+## DEFINE FUNCTION TO CREATE CONNECTOME
+Create_Connect_abs_df <- function(df_list, nroi1){
+  OBS=length(df_list)
+  #Empty matrix to fill, dimension reduced
+  Connect_diag_mat1 <- matrix(NA,nrow = OBS, ncol = nroi1*(nroi1-1)/2)
+  
+  for ( i in 1:OBS){
+    #1. scan all observation
+    #2. make corr matrix
+    cor_mat_i <- cor(t(df_list[[i]]))
+    ## 2.1  HANDLE THE NAS!
+    cor_mat_i[is.na(cor_mat_i)] <- 0
+    #3. take only upper triangular matrix without the diagonal, and flatten 
+    cor_arr_i <- cor_mat_i[upper.tri(cor_mat_i, diag = F)]
+    remove(cor_mat_i)
+    #4. save it in new matrix
+    Connect_diag_mat1[i,] <- abs(cor_arr_i)
+  }
+  return(Connect_diag_mat1)
+}
+
+Connect_diag_mat_abs_ <- Create_Connect_abs_df(train_OBS_l,nroi)
+
+Connect_diag_mat_abs2 <- data.frame(Connect_diag_mat_abs_,
+                                age=traindf$age,sex=as.numeric(((traindf$sex=='male')*1)),y=as.factor(traindf$y))
+
+nrow(Connect_diag_mat_abs2)
+ncol(Connect_diag_mat_abs2)
+
+```
+The final Dataset has 600 rows, same observation as the start, and 6673 columns, the connectome correlations between ROIs flattened.
+
+```{r Hist Connectome, echo=FALSE}
+hist(Connect_diag_mat_abs_, breaks = 100, main = "Histogram of Connectome dataset", xlab = "Connectome values")
+```
+
+
+
+### KPCA on the Connectome dataset 
+
+```{r KPCA }
+N_features=50
+
+#KPCA
+dt<-as.matrix(Connect_diag_mat_abs2[,-6673])  
+rbf<-rbfdot(sigma=0.01)   
+km<-kernelMatrix(rbf,dt)
+kpc <- kpca(km,data=Connect_diag_mat_abs2[,-6673],kernel="rbfdot",kpar=list(sigma=0.2),features=N_features)
+
+#KERNEL COMPONENTS as new dataset
+kern_comp <- pcv(kpc)
+kern_comp2 <- data.frame(kern_comp, y=as.factor(traindf$y))
+```
+
+The Number of features = 50  was treated like a hyperparameter and cross-validated as the best number of features to get the best accuracy.
+
+#### **3D projections of kpca components 1,2,3**
+```{r 3Dplot KPCA, echo=FALSE, warning=FALSE,message=FALSE}
+# 3D - Projections
+suppressPlotlyMessage <- function(p) {
+  suppressMessages(plotly_build(p))
+}
+p1 <- plot_ly(kern_comp2, x = ~X1, y = ~X2, z = ~X3, 
+              color = ~y, size=5,colors = c('#BF382A', '#0C4B8E')) # %>% add_markers()
+
+suppressPlotlyMessage(p1)
+
+```
+
+
+### SVM Tuning process
+Due to the time - consuming task, in order to handle the rmarkdown, the tuning code is reported but not executable. 
+The parameters tuned were the type of kernel, the Cost and the Gamma parameters.
+We can run the best performance revealed by the process, with parameters: 
+
+* Kernel - Radial
+* Gamma - 0.0001
+* Cost - 100 
+
+```{r Tuning svm}
+## tuning
+#tune_out <- 
+#  tune.svm(x = kern_comp2[, -51], y = kern_comp2[, 51], 
+#           type = "C-classification", 
+#           kernel = c('polynomial','radial'),
+#           cost = 10^(1:5), 
+#           gamma = c(0.1,0.01,0.001,0.0001),
+#           cross=10, nrepeat=15)
+#
+#
+#summary(tune_out)
+#1 - tune_out$best.performance
+set.seed(1)
+tune_out <- 
+  tune.svm(x = kern_comp2[, -(N_features+1)], y = kern_comp2[, (N_features+1)], 
+           type = "C-classification", 
+           kernel = "radial", cost = 100, 
+           gamma = 0.0001, cross=10, nrepeat=15)
+
+summary(tune_out)
+1 - tune_out$best.performance
+```
+
+This model is performing with a stable accuracy over 0.63, much better than any other model and preprocess of the data that we tried (reported later). 
+
+
+### Kaggle prediction - Handle test dataset
+In order to predict the new test values, we now have to pre-process the test data in the same way.
+We have to generate a Connectome dataset first:
+
+```{r Connectome test dataset, warning=FALSE}
+#Generate Connectome test dataset
+#1. CREATE LIST OF DATAFRAMES
+test_OBS_l = list()
+for (i in 1:nrow(testdf)){   #scan every observation 
+  if(i/nrow(testdf)==0.5) print('halfway')
+  #each time, create empty matrix of nroixntime
+  df_obs <- matrix(NA,nrow = nroi, ncol = ntime)
+  for (j in 1:nroi){
+    ##fill the matrix with slices of the obs 
+    df_obs[j,] <- as.numeric(testdf[i,(4+(j-1)*ntime):(4+(ntime-1) +(j-1)*ntime)])
+  }
+  #save in the list of datasets
+  test_OBS_l <- append(test_OBS_l,list(df_obs))
+}
+remove(df_obs)
+
+## Now we have every observation in order in a df list
+#test_OBS_l[[1]]
+
+#2. CREATE CONNECTOME DATASET
+Connect_test <- Create_Connect_abs_df(test_OBS_l,nroi)
+nrow(Connect_test)
+ncol(Connect_test)
+```
+
+Data handling for KPCA - SVM with train and Test: 
+```{r Data handling train-test ,warning=FALSE}
+#train new dataframe
+train_new <- data.frame(Connect_diag_mat_abs_, age=traindf$age, sex= ((traindf$sex=='male')*1))
+#test new dataframe 
+test_new <- data.frame(Connect_test, age=testdf$age, sex = ((testdf$sex=='male')*1))
+
+#binding together the data to perform kpca
+total_new <- rbind(train_new, test_new)
+
+################# KPCA -> SVM PIPELINE
+dt2<-as.matrix(total_new)       
+rbf2<-rbfdot(sigma=0.01)   
+km2<-kernelMatrix(rbf2,dt2)
+
+#choose a number of features to extract
+N_feat=50
+kpc2 <- kpca(km2,data=total_new,kernel="rbfdot",kpar=list(sigma=0.2),features=N_feat)
+
+# CREATE DATAFRAMES FROM KERNEL COMPONENTS
+kern_comp_test <- pcv(kpc2)
+kern_comp_test2 <- data.frame(kern_comp_test)
+
+#SPLIT IN TRAIN AND TEST
+train_kern_kaggle <- data.frame(kern_comp_test2[1:600,], y=as.factor(traindf$y))
+test_kern_kaggle <- kern_comp_test2[601:799,]
+```
+
+### Final Prediction: Best Kaggle Prediction so far
+```{r kaggle submission}
+## SVM with TUNED PARAMETERS Gamma 0.0001, cost 100, N_features 50.
+svmfit_kern_6 = svm(y ~ ., data = train_kern_kaggle, kernel = "radial", gamma=10^(-4), cost = 100, scale = TRUE)
+#prediction 
+pred_kern_test6 <- predict(svmfit_kern_6,test_kern_kaggle)
+df <- data.frame(testdf$id,pred_kern_test6)
+colnames(df) <- c('id','target')
+head(df)
+#write.csv(df,file = 'Prediction_kern6.csv',row.names = F )
+```
+
+## A.2 Other Methods
+### A.2.1 Same Connectome dataset, Random Forest model
+After the KPCA reduced connectome dataset, we tried to use also a Random Forest Model.
+
+```{r Random Forest1}
+#Tuning process 
+#control <- trainControl(method='repeatedcv', 
+#                        number=10, 
+#                        repeats=3,
+#                        search = 'random')
+#Random generate 15 mtry values with tuneLength = 15
+#set.seed(1)
+#rf_random <- train(y ~ .,
+#                  data = kern_comp2,
+#                   method = 'rf',
+#                   metric = 'Accuracy',
+#                   tuneLength  = 15, 
+#                   trControl = control)
+#print(rf_random)
+
+
+#Simple Random Forest model tuned with: mtry=5, nodesize 3,samplesize 200
+set.seed(1)
+rf.model <- randomForest(formula = y ~ ., mtry = 5,
+                         ntree=5000,
+                         nodesize = 3,
+                         sampsize = 200,
+                         data = kern_comp2, importance=T, cross=10)
+rf.model
+
+```
+After Tuning the Random Forest, the best Accuracy we can get is still 0.60/0.61, less than the SVM.
+
+
+### A.2.2 Different Connectome. Cross-Correlation
+Instead of taking the simple Pearson correlation between ROI's, another strategy is to account for some time-delay correlation measure, like cross-correlation. In this way, if two ROI's have small/bad correlation in real-time but similar behaviors after a little delay of time instances, the cross-correlation value still going to be set in a greater value than the first correlation.
+
+```{r Delayed Corr functions}
+##Create function that perform cross correlation
+r_jk <- function(xj,xk,d){
+  d=abs(d)                     # is the delay parameter
+  N=length(xj)
+  xj_s <- xj[d:N]               #the two arrays are cut as the delay
+  xk_s <- xk[1:(N-d +1)]   
+  xjkprod <- xj_s*xk_s      
+                                
+  rjk_d <- (1/N)*(sum(xjkprod)) #cross correlation  
+  return(abs(rjk_d))
+}
+
+#Create list of cross-correlated values varying d
+List_maker <- function(xk,xj){
+  N=length(xj)
+  list_r <- c()
+  for (d in 1:floor(N/4)){
+    list_r <- append(list_r,r_jk(xj,xk,d))
+  }
+  return(list_r)
+}
+
+
+#The Strength of the connection between two ROis is set with: 
+# Strength = 1 / d, with d the delayed steps where the cross-correlation is higher.
+Strength_maker <- function(xj,xk){
+  list_rjk <- List_maker(xj,xk)
+  list_rkj <- List_maker(xk,xj)
+  
+  idxmaxjk <- which(list_rjk == max(list_rjk))
+  idxmaxkj <- which(list_rkj == max(list_rkj))
+  
+  Strength <- 1/(min(idxmaxjk,idxmaxkj))      
+  return(Strength)
+}
+```
+
+```{r delayed Corr functions2}
+Create_Delayed_flat_corr <- function (df){
+  nrows <-nrow(df)
+  Delayed_corr <- matrix(NA, nrow = nrows, ncol = nrows)
+  
+  for (i in 1:nrows){
+    xj <- df[i,]
+    for (j in 1:nrows){
+      xk <- df[j,]
+      
+      if (i<j){
+        Delayed_corr[i,j] <- Strength_maker(xj,xk)
+      }
+    }
+  }
+  Flat_delayed <- Delayed_corr[upper.tri(Delayed_corr, diag = F)]
+  return(Flat_delayed)
+}
+
+Obs1_Cross_Cor <- Create_Delayed_flat_corr(train_OBS_l[[1]])
+head(Obs1_Cross_Cor)
+
+```
+
+Whole dataset of Delayed Correlation is performed, but not executed here for time reasons.
+```{r Delayed Corr}
+
+Create_Connect_delay <- function(df_list, nroi1){
+  OBS=length(df_list)
+  #Empty matrix to fill, dimension reduced
+  Connect_diag_mat1 <- matrix(NA,nrow = OBS, ncol = nroi1*(nroi1-1)/2)
+  for ( i in 1:OBS){
+    #print(i)
+    Connect_diag_mat1[i,] <- Create_Delayed_flat_corr(train_OBS_l[[i]])
+  }
+  return(Connect_diag_mat1)
+}
+
+#Connect_delay_df <- Create_Connect_delay(train_OBS_l,nroi)   ## 15 Mins!
+```
+
+### A.2.2 Models with Cross-Correlation dataset
+1. **SVM** is performing worse (0.59/0.60) than our Pearson Correlation Dataset.
+2. **Random Forest** also performs worse (0.58/59) than the other models.
+
+
+
+
+# Part B
+```{r warning=FALSE, echo=FALSE, results='hide', message=FALSE}
+#Load Libraries
+library(nptest)
+library(snow)
+```
+
+
+We use as our 10 variables the first 10 KPCA components of our Connectome dataset: the goal is to see if there is going to be some difference between the variable importance of these features.
+Since a KPCA transformation does not have the PCA maximized variability which results in better "importance" of the first ones, but insted spread the variance in all KPCA components, we are not expecting great changes in feature importance, but it may still appear.
+
+```{r datasets}
+##rename for PART B LOCO  
+train <- data.frame(train_kern_kaggle[,1:10], y=train_kern_kaggle$y)
+
+
+#ncol(train)
+train_num <- train
+#Create second train for part B LOCO
+train_num$y <- as.numeric(train$y=='autism')
+head(train_num)
+```
+
+```{r PLot function, echo=FALSE}
+Plot_CI <- function(metodo, Theta, Lower,Upper, var_name){
+  
+  if (metodo=='diff'){
+    space <- 0.003
+    y_label = 'Accuracy change'
+  }
+  else if(metodo=='frac'){
+    space <- 0.3
+    y_label = '% Accuracy change'
+  }
+  else if (metodo == 'loco'){
+    space <- 0.003
+    y_label = ' value change'
+    
+  }
+
+  h_value=0
+  Variables <- seq(1,10,1)
+  y_lim_1 <- c(min(Lower)-space,max(Upper)+space)
+  
+  plot(Variables,Theta, ylim=y_lim_1,
+       ylab= y_label, xlab='Variables', 
+       main= paste('LOCO CI of median J-Variable',y_label) ,
+       pch=19, lwd=3, col='black')
+  abline(h=h_value)
+  
+  for (idx in Variables){
+    color='blue'
+    if (Lower[idx]>h_value){
+      color = "green"
+    }
+    else if (Upper[idx]<h_value){
+      color = "red"
+    }
+    points(c(idx,idx),c(Lower[idx]-abs(Lower[idx]*0.05), Upper[idx]+abs(Upper[idx]*0.05)), type='l',
+           lwd=6, col=color)
+  }
+  grid(10,10, lwd = 2) 
+  axis(1, at=Variables,labels=Variables, col.axis="black", las=1)
+}
+```
+
+Lets define a Function that performs A Leave One Covariate Out Analysis for every variable in the dataset.
+The parameters of this function are
+
+* Proportion: handles how much dataset goes on the D2 split. Ex. Proportion = 3 -> 1/3 of the data goes to D2.
+* alpha: the confidence interval needed in the non parametric  bootstrapping confidence interval.
+
+```{r Create LOCO function}
+#LOCO Function
+
+Create_LOCO_num <- function(df,Proportion,alpha=0.9){
+  #How many Columns we need to LOCO? (Ncols -1)
+  Ncols <- ncol(df)
+  
+  #1. Split the df randomly in two datasets, D1 and D2.
+  # Parameter Proportion handles how much Proportion of dataset goes on the D2 "test" dataset
+  n1 <- floor(nrow(df)/Proportion)
+  idx <- sample(nrow(df),n1,replace = FALSE)
+  D1 <- df[-idx,]
+  D2 <-df[idx,]
+
+  
+  #2. Compute estimate f_n1_hat
+  svmfit_LOCO = svm(y ~ ., data = D1, kernel = "radial", gamma=0.001, cost = 100, scale = TRUE)
+  
+  #predict on D2 
+  f_n1_hat <- predict(svmfit_LOCO,D2[-(Ncols)])
+  
+  ## Initialize var that are going to store the Theta point estimate and Upper and Lower CI.
+  Delta_j_list <- c()
+  Lower <- c()
+  Upper <- c()
+  
+  ## Iterating through all the Variables in the df
+  
+  Variables <- seq(1,(Ncols-1),1)
+  for (Var_loco in Variables){
+    #print(Var_loco)
+    #3. select A variable j and compute estimate f_n1_wj_hat
+    
+    seq_cols <- seq(1,(Ncols),1)
+    
+    #columns without j-th var
+    seq_cols_w = seq_cols[! seq_cols %in% Var_loco]
+    
+    #Create Partial Datasets without j-var
+    D1_wj <- D1[,seq_cols_w]
+    D2_wj <- D2[,seq_cols_w]
+    
+    #new dataset D1_wj and D2_wj without variable j 
+    
+    #Fit without j
+    svmfit_LOCO_wj = svm(y ~ ., data = D1_wj, kernel = "radial", gamma=0.001, cost = 100, scale = TRUE)
+    
+    #4. Predict the f_n1_wj_hat with the D2 dataset 
+    f_n1_wj_hat <- predict(svmfit_LOCO_wj,D2_wj[-(Ncols-1)])
+    
+    
+    #Then calculate difference between the losses: We use Absolute Error as in the linked paper of Lei et al.
+    real_y <- D2$y
+    f_hat <- f_n1_hat
+    f_wj_hat <- f_n1_wj_hat
+    
+    ##List of values
+    delta_j <- abs(real_y-f_wj_hat) - abs(real_y - f_hat)
+    
+    
+    #Use this list for CI.
+    ###Bootstrapping method for Confidence Interval
+    npbt_method2 <-  np.boot(delta_j,R=50000, statistic = median,level = alpha)
+    
+    
+    ##Save Median point estimate and Lower and Upper CI.
+    Delta_j_list <- append(Delta_j_list, npbt_method2$t0)
+    Lower <- append(Lower,as.numeric(npbt_method2$percent[1]))
+    Upper <- append(Upper,as.numeric(npbt_method2$percent[2]) )
+  }
+  
+  Df_CI <- data.frame(Delta_j_list,Lower,Upper)
+  
+  #Return Dataframe with info
+  return(Df_CI)
+}
+```
+
+The LOCO function is executed with a 3 Proportion rate and a 0.90 confidence interval.
+```{r show dataset}
+set.seed(12)
+Df_CI_num <- round(Create_LOCO_num(train_num,Proportion=3,alpha=0.90),5)
+data.frame(Variables = colnames(train_num)[1:10],Df_CI_num)
+```
+We organize the data such this, with Variables, point estimate values, and Upper and Lower values of our Confidence Interval.
+
+```{r Plot CI , echo=FALSE}
+Plot_CI('loco',Df_CI_num[,1],Df_CI_num[,2],Df_CI_num[,3],colnames(train_num)[1:10])
+```
+
+No big importance in specific variables are expressed, but var 4 and 5 seems to increase the most, even if they are not actually statistically significant because the confidence interval contains the 0 values. 
+Surprisingly, the 9-th variable have a statistically significant increase.
+We have also to remember how all these results are conditional to the D1 dataset, splitted randomly.
+
+
+Lets compare this values with the variable importance of a random forest simple model.
+
+```{r rfmodel }
+#set.seed(1)
+rf.model <- randomForest(formula = y ~ ., mtry = 4,
+                         ntree=7000,
+                         nodesize = 3,
+                         sampsize = 100,
+                         data = train, importance=T, cross=10)
+rf.model
+rf.model$importance
+```
+
+```{r rfplot , echo=FALSE}
+#rf.model$importanceSD
+Variab <- seq(1,10,1)
+plot(Variab,rf.model$importance[,3], xlab='Variables', ylab="Var importance")
+abline(h=0, lwd=4)
+lines(Variab,rf.model$importance[,3])
+lines(Variab,rf.model$importance[,3] + rf.model$importanceSD[,3], col="grey")
+lines(Variab,rf.model$importance[,3] - rf.model$importanceSD[,3], col="grey")
+```
+
+### Comment
+Here the importance of variable 5 here is enhanced, as the variable 9 remains a significant increase in prediction.
+All the other values are quite volatile in respect to the LOCO.
+
+Actually the LOCO algorithm used on the KPCA components, as expected, does not seem to retain much information in respect to feature importance: the kpca variables work together well, and one does not seem to prevale on others.
+
+### Loco problems
+
+Also is crucial how the conditionality on the random D1 dataset influence the results. Here we repeat the LOCO method some times, and see how much the information given change.
+
+```{r Multiple graphs, echo=FALSE}
+par(mfrow = c(2,2))
+for ( i in 1:4){
+  set.seed(i^2)
+  Df_CI_num_t <- round(Create_LOCO_num(train_num,Proportion=3,alpha=0.90),5)
+  Plot_CI('loco',Df_CI_num_t[,1],Df_CI_num_t[,2],Df_CI_num_t[,3],colnames(train_num)[1:10])
+}
+
+```
+
+### Proportion Rate
+Also the Proportion rate is crucial to the variability of the Feature importance measure:
+```{r Graph Prop, echo=FALSE}
+Prop_list <- c(3,5,7,10)
+
+par(mfrow = c(2,2))
+for ( i in Prop_list){
+  set.seed(i^2)
+  Df_CI_num_t <- round(Create_LOCO_num(train_num,Proportion=i,alpha=0.90),5)
+  
+  Theta=Df_CI_num_t[,1]
+  Lower= Df_CI_num_t[,2]
+  Upper = Df_CI_num_t[,3]
+  
+  space=0
+  y_label= "Feature Importance"
+  h_value=0
+  Variables <- seq(1,10,1)
+  y_lim_1 <- c(min(Lower)-space,max(Upper)+space)
+  
+  plot(Variables,Theta, ylim=y_lim_1,
+       ylab= y_label, xlab='Variables', 
+       main= paste('LOCO CI, Proportion: ',i) ,
+       pch=19, lwd=3, col='black')
+  abline(h=h_value)
+  
+  for (idx in Variables){
+    color='blue'
+    if (Lower[idx]>h_value){
+      color = "green"
+    }
+    else if (Upper[idx]<h_value){
+      color = "red"
+    }
+    points(c(idx,idx),c(Lower[idx]-abs(Lower[idx]*0.05), Upper[idx]+abs(Upper[idx]*0.05)), type='l',
+           lwd=6, col=color)
+  }
+  grid(10,10, lwd = 2) 
+  axis(1, at=Variables,labels=Variables, col.axis="black", las=1)
+  
+}
+
+```
+
+
+
+
+## PART C 
+
+Our last part of Final Homework consists in understanding if the works of Ovid have  stylometric differences according to the periods. 
+So at the beginning we import the dataset.
+
+```{r warning=FALSE }
+
+library(data.table)
+esa_df <- fread(file='esa_scheme_only.csv')
+
+```
+
+Before proceeding with the implementation of the chosen methodology, let’s make a first exploration of the data.
+
+
+```{r warning=FALSE, results='hide'}
+
+summary(esa_df)
+ncol(esa_df)
+
+sum(as.numeric(esa_df[1,3:18]))
+
+```
+
+
+```{r warning=FALSE, echo=FALSE, results='hide', message=FALSE  }
+
+Plot_Comp_data <- function(j){
+  barplot(as.numeric(esa_df[j,3:18]),
+          names.arg= colnames(esa_df)[3:18],
+          cex.axis = 1,las=2,
+          ylab ='Percentage',
+          main= paste('Compositional data', esa_df[j,1],', Period',esa_df[j,2]))
+}
+
+#Example plot
+par(mfrow=c(2,2))
+for (j in 1:4){
+  Plot_Comp_data(j)
+}
+par(mfrow=c(1,1))
+
+```
+
+This allows us to have a clear visualization of compositional data.
+
+
+Now we finally got inside our real work.
+We create, with the parameter $d(Xr,Xs)$, the distance of Aitchison:
+
+```{r warning=FALSE, echo=FALSE, results='hide', message=FALSE  }
+X <- esa_df[,3:18]
+
+```
+
+
+```{r warning=FALSE, results='hide'}
+
+Aitch_distance<- function(xr,xs){
+  xr<-as.numeric(xr)
+  xs<-as.numeric(xs)
+  xr_geomean <- exp(mean(log(xr)))
+  xs_geomean <- exp(mean(log(xs)))
+  #xr_geomean <- geometric.mean(xr)
+  #xs_geomean <- geometric.mean(xs)
+  log_ratio_xr <- log(xr/xr_geomean)
+  log_ratio_xs <- log(xs/xs_geomean)
+  
+  d<- sqrt(sum((log_ratio_xr-log_ratio_xs)^2,na.rm=TRUE))
+  return (d)
+}
+
+
+Aitch_distance(X[1,],X[2,])
+Aitch_distance(X[1,],X[17,])
+
+```
+
+We can observ there is a problem with the zero.
+
+```{r warning=FALSE,results='hide'}
+
+X[17,]
+
+sorted_X <- sort(as.matrix(X))
+min_value <- sorted_X[2]
+
+#substitute min_value/2 in X and in the original dataset
+X[X==0]<-(min_value/2)
+X[17,]
+```
+
+As suggest in the paper, we solved this problem by replacing 0 with half of the smallest value (except zero).
+Then we will need to use the real dataset "esa_df" as well as X:
+
+```{r warning=FALSE,results='hide'}
+
+esa_df[,3:18] <- X
+esa_df[17,]
+
+```
+
+After that the distance matrix can be made:
+
+```{r warning=FALSE}
+
+Distance<- c()
+for (i in 1:nrow(X)){
+  for (j in 1:nrow(X)){
+    
+    #distance from every row
+    Distance<-c(Distance,Aitch_distance(X[i,],X[j,]))
+  }
+}
+
+```
+
+Now we define the compositional Gaussian Kernel.
+
+```{r warning=FALSE, results='hide'}
+
+#we take h like the median distance to use in Gaussian Kernel function
+h_median<-median(Distance)
+h_median
+
+
+comp_gaus_kern <- function(xr,xs,h=h_median){
+  dist <- Aitch_distance(xr,xs)
+  return(exp(-(1/h)*dist))
+}
+
+```
+
+## Point 1.
+
+Finally we arrived at the first point of our Work.
+Our goal is to test the following system of hypothesis:
+
+\begin{cases}
+H0: & There\ are\ not\ stylometric\ differences \\ 
+H1: & There\ are\ stylometric\ differences 
+\end{cases} 
+
+
+But before we divide the dataset aggregating the works of the first and second period.
+```{r warning=FALSE, results='hide'}
+
+esa12 <- subset.data.frame(esa_df, period==1 | period==2)
+esa3 <- subset.data.frame(esa_df, period==3)
+
+#Create matrix data 
+X_tot <- esa_df[,3:18]
+X12 <- esa12[,3:18]
+X3 <- esa3[,3:18]
+
+nrow(X3)
+nrow(X12)
+
+
+```
+
+We want implement functions that calculates the approximation of Gretton with: 
+
+$$ M^2= {1\over m^2}\sum_{j}\sum_{k}K(Xj,Xk){-}2mn\sum_{j}\sum_{k}K(Xj,Yk)+{1\over n^2}\sum_{j}\sum_{k}K(Yj,Yk)$$
+```{r warning=FALSE,results='hide'}
+
+Sum_Kern_function <- function(X,Y){
+  #Sums up the kernels of two datasets
+ 
+  m <- nrow(X)
+  n <- nrow(Y)
+  
+  somma <- 0
+  for(j in 1:m){
+    for(k in 1:n){
+      a<-comp_gaus_kern(X[j,],Y[k,])
+      somma<-sum(somma,a)
+    }
+  }
+ return(somma) 
+}
+
+Sum_Kern_function(X3,X3)
+
+```
+
+Second function is implement to generate the M value
+
+
+```{r warning=FALSE}
+Generate_M <- function(X,Y){
+  m<-nrow(X) 
+  n<-nrow(Y)
+  
+  #compute sum of the quantities:
+  SumX <- Sum_Kern_function(X,X)
+  SumY <- Sum_Kern_function(Y,Y)
+  SumXY <- Sum_Kern_function(X,Y)
+  
+  M_hat_2<- (1/m^2)*SumX - (2/(n*m))*SumXY + (1/n^2)*SumY
+  
+  return(sqrt(M_hat_2)) 
+}
+
+
+M_hat <- Generate_M(X12,X3)
+M_hat
+
+
+```
+
+Dataset is divided to perform the Permutation test.
+
+```{r warning=FALSE}
+
+#Set aside the observation of the Double eroidhes
+DH<- esa_df[which(is.na(esa_df$period)),]
+# numeric matrix 
+X_dh <- DH[,3:18]
+
+
+
+#Esa dataset without the Double heroides row
+esa_df_wd <- esa_df[-which(is.na(esa_df$period)),]
+#numeric matrix
+X_wd <- esa_df_wd[,3:18]
+
+
+```
+
+The time allocation is permutated randomly and the test statistics M are recalculated.
+
+
+```{r warning=FALSE}
+
+library(kernlab)
+
+Create_Permut_list <- function(N,X,dim){
+  #initialize List
+  M_list <- c()
+  
+  for(i in 1:N){
+    
+    
+    #randomly extract list of idx from dataset 
+    #with dimension dim
+    permut <- sample(nrow(X),dim, replace = FALSE)
+    
+    #Create 2 datasets splitted randomly, 
+    X_perm1 <- X[permut,]
+    X_perm2 <- X[-permut,]
+    
+    #Create an M value from this random permutation datasets
+    M <- Generate_M(X_perm1,X_perm2)
+    
+    #add to list
+    M_list[i] <- M
+  }
+  return(M_list)
+}
+
+
+```
+
+This process is repeated N times.
+
+
+```{r warning=FALSE}
+
+#Lets test if our M_hat value is statistically significant 
+
+N=1000
+
+#generate M List 
+M <- Create_Permut_list(N,X_wd,dim=10)
+
+```
+
+
+```{r warning=FALSE, echo=FALSE, results='hide', message=FALSE  }
+
+hist(M,breaks = 200)
+abline(v=M_hat)
+text(M_hat+0.01,100,'M_hat')
+M_hat
+
+
+
+```
+
+In the last part of point 1 we evaluate p-value.
+```{r warning=FALSE}
+
+mean(M>=M_hat)
+
+```
+
+The p-value is 0.007, less then a 0.05, so we can refuse the null hypotesis and say that there are indeed stylistic differences between period 3 and the other two.
+
+## Point 2
+
+Using the above point, we proceed to verify if the observation related to the work Double Heroides (DH)  shows stylistic differences compared to the other works of the author.
+
+The following system of hypotheses will be studied:
+
+\begin{cases}
+H0: & DH\ not\ has\ stylometric\ differences \\ 
+H1: & DH\ has\ stylometric\ differences 
+\end{cases} 
+
+```{r warning=FALSE, results='hide'}
+
+N=1000
+M_hat_tot <- Generate_M(X_dh,X_wd)
+M_hat_tot
+
+M_tot_l <- Create_Permut_list(N,X_tot,1)
+
+```
+
+```{r warning=FALSE}
+
+mean(M_tot_l>=M_hat_tot)
+
+```
+
+```{r warning=FALSE, echo=FALSE, results='hide', message=FALSE  }
+
+hist(M_tot_l, breaks = 100)
+abline(v=M_hat_tot)
+
+```
+
+Based on p.value we dont have enough evidence to reject H0 , so the Double Heroiding is concording with the Ovidio work.
+
+Now lets heck period by period to understand a which one DH is attributable.
+
+\begin{cases}
+H0: & DH\ not\ is\ attributable\ at\ corrent\ period \\ 
+H1: & DH\ is\ attributable\ at\ corrent\ period 
+\end{cases} 
+
+
+The first:
+
+```{r warning=FALSE}
+
+#extract datasets
+esa1 <- subset.data.frame(esa_df, period==1)
+X1 <- esa1[,3:18]
+
+#test statistic
+M1_hat <- Generate_M(X1,X_dh)
+
+#Add observation DH to dataframe
+X1[nrow(X1)+1,] <- X_dh
+
+#Create permutation 
+M_list_1per <- Create_Permut_list(N,X1,1)
+
+#pvalue
+mean(M_list_1per >= M1_hat)
+
+```
+
+P.value too high, we don't have an evidence to reject H0, so we can't bring DH back to the first period. 
+
+Second period:
+```{r warning=FALSE}
+
+#extract datasets
+esa2 <- subset.data.frame(esa_df, period==2)
+X2 <- esa2[,3:18]
+
+#test statistic
+M2_hat <- Generate_M(X2,X_dh)
+
+#Add observation DH to dataframe
+X2[nrow(X2)+1,] <- X_dh
+
+#Create permutation 
+M_list_2per <- Create_Permut_list(N,X2,1)
+
+#pvalue
+mean(M_list_2per >= M2_hat)
+
+
+```
+
+The same as before. DH is not attributable to the second period.
+
+Third period:
+
+```{r warning=FALSE}
+
+#extract datasets
+esa3 <- subset.data.frame(esa_df, period==3)
+X3 <- esa3[,3:18]
+
+
+#test statistic
+M3_hat <- Generate_M(X3,X_dh)
+
+
+#Add observation DH to dataframe
+X3[nrow(X3)+1,] <- X_dh
+
+#Create permutation 
+M_list_3per <- Create_Permut_list(N,X3,1)
+
+#pvalue
+mean(M_list_3per >= M3_hat)
+
+
+```
+
+Nothing change, the Ovid's work is not even attributable to the third period.
+
+
+### Conclusion
+
+The work Double Heroids does not appear to be related to any period. This result does not seem to agree with that of point 1 because the three periods show stylistic differences, therefore it was expected that the work DH was attributable to at least one of the three periods.
+Actually, the stylistic difference noted with does not allow the traceability of Double Heroids, which already presented an uncertainty in the dating.
+It can however be concluded that our analysis, although it does not resolve the question of dating, at least attests to the authorship of the work to Ovid.
+
+
+- 
+
+</font>
