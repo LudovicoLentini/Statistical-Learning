@@ -1,6 +1,6 @@
 # Statistical-Learning HW3
 
-FULL REPORT VISIBLE HERE IN HTML: https://ludovicolentini.github.io/Statistical-Learning/ 
+[FULL REPORT VISIBLE HERE IN HTML](https://ludovicolentini.github.io/Statistical-Learning/)
 
 ## Part A
 ### Connectome prediction
